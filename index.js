@@ -18,10 +18,21 @@ function normalizeVisibility(candidate){
 	const hiddenAncestor=candidate.closest('[aria-hidden="true"]');
 	if(hiddenAncestor){
 		hiddenAncestor.removeAttribute('aria-hidden');
-		hiddenAncestor.style.pointerEvents='auto';
-		hiddenAncestor.style.visibility='visible';
+		if(hiddenAncestor.style){
+			hiddenAncestor.style.pointerEvents='auto';
+			hiddenAncestor.style.visibility='visible';
+			hiddenAncestor.style.display='';
+		}
 	}
-	return candidate.offsetParent!==null||candidate.getClientRects().length>0?candidate:null;
+	if(candidate){
+		candidate.removeAttribute('aria-hidden');
+		if(candidate.style){
+			candidate.style.pointerEvents='auto';
+			candidate.style.visibility='visible';
+			candidate.style.display='';
+		}
+	}
+	return candidate;
 }
 
 function locateButton(){
