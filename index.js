@@ -17,6 +17,10 @@ function dispatchClickSequence(target){
 function normalizeVisibility(candidate){
 	const hiddenAncestor=candidate.closest('[aria-hidden="true"]');
 	if(hiddenAncestor){
+		const focused=document.activeElement;
+		if(focused && hiddenAncestor.contains(focused) && typeof focused.blur==='function'){
+			focused.blur();
+		}
 		hiddenAncestor.removeAttribute('aria-hidden');
 		if(hiddenAncestor.style){
 			hiddenAncestor.style.pointerEvents='auto';
@@ -25,6 +29,9 @@ function normalizeVisibility(candidate){
 		}
 	}
 	if(candidate){
+		if(document.activeElement===candidate && typeof candidate.blur==='function'){
+			candidate.blur();
+		}
 		candidate.removeAttribute('aria-hidden');
 		if(candidate.style){
 			candidate.style.pointerEvents='auto';
