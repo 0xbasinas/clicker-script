@@ -3,7 +3,7 @@ let findButtonTimeout;
 const maxAttempts=10;
 let attempt=0;
 const findButtonDelay=2000;
-const buttonSelector='button.uikit-primary-button.uikit-primary-button_size_medium.navigation-controls__button.uikit-primary-button_next.navigation-controls__button_next';
+const buttonSelector='#content > div > div.main-container > nav > div.navigation-controls.universal-control-panel__navigation-controls > button.uikit-primary-button.uikit-primary-button_size_medium.navigation-controls__button.uikit-primary-button_next.navigation-controls__button_next';
 const durationMs=2*60*60*1000;
 const startTimestamp=Date.now();
 const endTimestamp=startTimestamp+durationMs;
