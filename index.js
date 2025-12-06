@@ -11,19 +11,24 @@ class ButtonClicker {
 			primarySelector: '#content > div > div.main-container > nav > div.navigation-controls.universal-control-panel__navigation-controls > button.uikit-primary-button.uikit-primary-button_size_medium.navigation-controls__button.uikit-primary-button_next.navigation-controls__button_next',
 			alternativeSelectors: [
 				'button.uikit-primary-button.uikit-primary-button_next.navigation-controls__button_next',
+				'button.uikit-primary-button.uikit-primary-button_size_medium.navigation-controls__button.uikit-primary-button_next',
 				'button.navigation-controls__button_next',
 				'button.uikit-primary-button_next',
 				'nav button.uikit-primary-button_next',
 				'div.navigation-controls button.uikit-primary-button_next',
 				'button[class*="uikit-primary-button_next"]',
-				'button[class*="navigation-controls__button_next"]'
+				'button[class*="navigation-controls__button_next"]',
+				'button:has(span.uikit-primary-button__button-text)',
+				'button:has(svg.uikit-primary-button__right-icon)'
 			],
 			xpathSelectors: [
 				'//*[@id="content"]/div/div[1]/nav/div[2]/button[2]',
 				'/html/body/div[2]/div/div[1]/nav/div[2]/button[2]',
 				'//button[contains(@class, "uikit-primary-button_next")]',
 				'//button[contains(@class, "navigation-controls__button_next")]',
-				'//nav//button[contains(@class, "uikit-primary-button")][2]'
+				'//nav//button[contains(@class, "uikit-primary-button")][2]',
+				'//button[contains(., "Next") and contains(@class, "uikit-primary-button")]',
+				'//button[.//span[contains(text(), "Next")] and contains(@class, "uikit-primary-button_next")]'
 			],
 			// Timing
 			clickInterval: 30000, // 30 seconds
@@ -35,6 +40,9 @@ class ButtonClicker {
 			// Button properties
 			primaryButtonColor: 'rgba(95, 139, 217',
 			requiredClasses: ['uikit-primary-button_next', 'navigation-controls__button_next'],
+			buttonText: 'Next', // Text content to match
+			buttonTextSelector: 'span.uikit-primary-button__button-text', // Selector for text span
+			buttonIconSelector: 'svg.uikit-primary-button__right-icon', // Selector for icon
 			// Logging
 			debug: false,
 			...config
@@ -115,22 +123,53 @@ class ButtonClicker {
 		if (!element) return null;
 
 		try {
-			// Fix ancestor chain
-			let ancestor = element;
-			while (ancestor && ancestor !== document.body) {
+			// First, specifically fix main-container and other common containers
+			const mainContainers = document.querySelectorAll('div.main-container, [class*="main-container"]');
+			for (const container of mainContainers) {
+				if (container.hasAttribute('aria-hidden') && element.closest('.main-container') === container) {
+					container.removeAttribute('aria-hidden');
+					this.log('DEBUG', 'Removed aria-hidden from main-container');
+				}
+				if (container.hasAttribute('inert')) {
+					container.removeAttribute('inert');
+				}
+			}
+
+			// Fix ancestor chain (go all the way up to document)
+			let ancestor = element.parentElement;
+			const ancestorsToFix = [];
+			
+			// Collect all ancestors first
+			while (ancestor && ancestor !== document && ancestor !== document.documentElement) {
+				ancestorsToFix.push(ancestor);
+				ancestor = ancestor.parentElement;
+			}
+
+			// Fix all ancestors (from closest to furthest)
+			for (const ancestor of ancestorsToFix) {
 				if (ancestor.hasAttribute?.('aria-hidden')) {
 					ancestor.removeAttribute('aria-hidden');
+					this.log('DEBUG', `Removed aria-hidden from ancestor: ${ancestor.tagName}.${ancestor.className}`);
 				}
 				if (ancestor.hasAttribute?.('inert')) {
 					ancestor.removeAttribute('inert');
+					this.log('DEBUG', `Removed inert from ancestor: ${ancestor.tagName}.${ancestor.className}`);
 				}
 				if (ancestor.style) {
-					ancestor.style.pointerEvents = 'auto';
-					ancestor.style.visibility = 'visible';
-					ancestor.style.display = ancestor.style.display || '';
-					ancestor.style.opacity = '1';
+					// Only set if not already set to avoid overriding intentional styles
+					if (ancestor.style.pointerEvents === 'none') {
+						ancestor.style.pointerEvents = 'auto';
+					}
+					if (ancestor.style.visibility === 'hidden') {
+						ancestor.style.visibility = 'visible';
+					}
+					if (ancestor.style.display === 'none') {
+						ancestor.style.display = '';
+					}
+					if (ancestor.style.opacity === '0') {
+						ancestor.style.opacity = '1';
+					}
 				}
-				ancestor = ancestor.parentElement;
 			}
 
 			// Fix element itself
@@ -138,12 +177,22 @@ class ButtonClicker {
 				element.disabled = false;
 			}
 			element.removeAttribute('aria-disabled');
+			element.removeAttribute('aria-hidden');
 			element.hidden = false;
 			
-			// Blur any focused element that might interfere
-			if (document.activeElement && element.contains(document.activeElement)) {
-				document.activeElement.blur?.();
+			// Ensure element is focusable
+			if (element.tabIndex < 0) {
+				element.tabIndex = 0;
 			}
+			
+			// Blur any focused element that might interfere (but not the target element)
+			const activeElement = document.activeElement;
+			if (activeElement && activeElement !== element && element.contains(activeElement)) {
+				activeElement.blur?.();
+			}
+
+			// Force a reflow to ensure changes take effect
+			void element.offsetHeight;
 
 			return element;
 		} catch (e) {
@@ -304,6 +353,84 @@ class ButtonClicker {
 		return null;
 	}
 
+	// Find button by text content
+	findButtonByTextContent() {
+		try {
+			// Method 1: Find span with text, then get parent button
+			const textSpans = document.querySelectorAll(this.config.buttonTextSelector);
+			for (const span of textSpans) {
+				if (span.textContent.trim() === this.config.buttonText) {
+					const button = span.closest('button');
+					if (button && button.classList.contains('uikit-primary-button')) {
+						return button;
+					}
+				}
+			}
+
+			// Method 2: Find all buttons and check text content
+			const allButtons = document.querySelectorAll('button');
+			for (const button of allButtons) {
+				const textContent = button.textContent.trim();
+				// Check if button contains "Next" text
+				if (textContent.includes(this.config.buttonText)) {
+					// Verify it has the right classes
+					if (button.classList.contains('uikit-primary-button') &&
+						(this.config.requiredClasses.some(cls => button.classList.contains(cls)))) {
+						return button;
+					}
+				}
+			}
+
+			// Method 3: Find by XPath with text content
+			const xpath = `//button[contains(., "${this.config.buttonText}") and contains(@class, "uikit-primary-button")]`;
+			const element = this.evaluateXPath(xpath);
+			if (element) return element;
+		} catch (e) {
+			this.log('DEBUG', 'Text content search error:', e);
+		}
+		return null;
+	}
+
+	// Find button by SVG icon
+	findButtonByIcon() {
+		try {
+			// Find SVG with the right icon class
+			const icons = document.querySelectorAll(this.config.buttonIconSelector);
+			for (const icon of icons) {
+				// Check if it has the arrow path (M8 4L14 10L8 16)
+				const path = icon.querySelector('path');
+				if (path) {
+					const pathD = path.getAttribute('d');
+					// Check for arrow path pattern
+					if (pathD && (pathD.includes('M8 4') || pathD.includes('L14 10') || pathD.includes('L8 16'))) {
+						const button = icon.closest('button');
+						if (button && button.classList.contains('uikit-primary-button')) {
+							return button;
+						}
+					}
+				}
+			}
+
+			// Alternative: Find buttons containing SVG with stroke
+			const buttons = document.querySelectorAll('button.uikit-primary-button');
+			for (const button of buttons) {
+				const svg = button.querySelector('svg');
+				if (svg) {
+					const path = svg.querySelector('path[stroke]');
+					if (path && path.getAttribute('stroke') === 'currentColor') {
+						// Likely the right icon
+						if (this.config.requiredClasses.some(cls => button.classList.contains(cls))) {
+							return button;
+						}
+					}
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Icon search error:', e);
+		}
+		return null;
+	}
+
 	// Main button locator with all strategies
 	locateButton() {
 		const strategies = [
@@ -312,15 +439,24 @@ class ButtonClicker {
 				const matches = document.querySelectorAll(this.config.primarySelector);
 				return Array.from(matches)[0] || null;
 			},
-			// Strategy 2: Alternative CSS selectors
+			// Strategy 2: Find by text content "Next" (very reliable)
+			() => this.findButtonByTextContent(),
+			// Strategy 3: Find by SVG icon (very reliable)
+			() => this.findButtonByIcon(),
+			// Strategy 4: Alternative CSS selectors
 			() => {
 				for (const selector of this.config.alternativeSelectors) {
-					const matches = document.querySelectorAll(selector);
-					if (matches.length > 0) return matches[0];
+					try {
+						const matches = document.querySelectorAll(selector);
+						if (matches.length > 0) return matches[0];
+					} catch (e) {
+						// Some selectors like :has() might not be supported, skip
+						this.log('DEBUG', `Selector not supported: ${selector}`);
+					}
 				}
 				return null;
 			},
-			// Strategy 3: XPath selectors
+			// Strategy 5: XPath selectors
 			() => {
 				for (const xpath of this.config.xpathSelectors) {
 					const element = this.evaluateXPath(xpath);
@@ -328,13 +464,13 @@ class ButtonClicker {
 				}
 				return null;
 			},
-			// Strategy 4: Modals and overlays
+			// Strategy 6: Modals and overlays
 			() => this.findButtonInModalsAndOverlays(),
-			// Strategy 5: Position and context
+			// Strategy 7: Position and context
 			() => this.findButtonByPositionAndContext(),
-			// Strategy 6: CSS property matching
+			// Strategy 8: CSS property matching
 			() => this.findButtonByCSSProperties(),
-			// Strategy 7: Last resort - any button with required classes
+			// Strategy 9: Last resort - any button with required classes
 			() => {
 				const allButtons = document.querySelectorAll('button');
 				for (const button of allButtons) {
@@ -366,6 +502,36 @@ class ButtonClicker {
 		return null;
 	}
 
+	// Fix aria-hidden issues proactively
+	fixAriaHiddenIssues() {
+		try {
+			// Find all main-container elements and remove aria-hidden
+			const mainContainers = document.querySelectorAll('div.main-container, [class*="main-container"]');
+			for (const container of mainContainers) {
+				if (container.hasAttribute('aria-hidden')) {
+					container.removeAttribute('aria-hidden');
+					this.log('DEBUG', 'Proactively removed aria-hidden from main-container');
+				}
+			}
+
+			// Find buttons that might be affected
+			const buttons = document.querySelectorAll('button.uikit-primary-button_next, button.navigation-controls__button_next');
+			for (const button of buttons) {
+				// Check if button or its ancestors have aria-hidden
+				let ancestor = button.parentElement;
+				while (ancestor && ancestor !== document.body) {
+					if (ancestor.hasAttribute('aria-hidden')) {
+						ancestor.removeAttribute('aria-hidden');
+						this.log('DEBUG', `Removed aria-hidden from button ancestor: ${ancestor.className}`);
+					}
+					ancestor = ancestor.parentElement;
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Error fixing aria-hidden issues:', e);
+		}
+	}
+
 	// Setup mutation observer with debouncing
 	setupMutationObserver() {
 		if (this.state.mutationObserver) {
@@ -374,6 +540,19 @@ class ButtonClicker {
 
 		let debounceTimer;
 		this.state.mutationObserver = new MutationObserver((mutations) => {
+			// Check for aria-hidden changes and fix them immediately
+			for (const mutation of mutations) {
+				if (mutation.type === 'attributes' && mutation.attributeName === 'aria-hidden') {
+					const target = mutation.target;
+					if (target.hasAttribute('aria-hidden') && 
+						(target.classList.contains('main-container') || 
+						 target.querySelector?.('button.uikit-primary-button_next'))) {
+						// Fix immediately if it affects our button
+						this.fixAriaHiddenIssues();
+					}
+				}
+			}
+
 			// Debounce to avoid excessive checks
 			clearTimeout(debounceTimer);
 			debounceTimer = setTimeout(() => {
@@ -392,7 +571,7 @@ class ButtonClicker {
 			childList: true,
 			subtree: true,
 			attributes: true,
-			attributeFilter: ['class', 'style', 'aria-hidden', 'hidden', 'disabled']
+			attributeFilter: ['class', 'style', 'aria-hidden', 'hidden', 'disabled', 'inert']
 		});
 
 		this.log('DEBUG', 'Mutation observer activated');
@@ -429,16 +608,25 @@ class ButtonClicker {
 			return;
 		}
 
+		// Fix aria-hidden issues before attempting to find/click
+		this.fixAriaHiddenIssues();
+
 		const button = this.locateButton();
 		if (button) {
-			const success = this.dispatchClickSequence(button);
-			if (success) {
-				this.state.clickCount++;
-				this.state.lastButtonFound = Date.now();
-				const remaining = this.state.endTimestamp - Date.now();
-				this.log('INFO', `Button clicked (${this.state.clickCount} total) | Time remaining: ${this.formatDuration(remaining)}`);
+			// Ensure button is interactable (this also fixes aria-hidden)
+			const interactableButton = this.ensureInteractable(button);
+			if (interactableButton) {
+				const success = this.dispatchClickSequence(interactableButton);
+				if (success) {
+					this.state.clickCount++;
+					this.state.lastButtonFound = Date.now();
+					const remaining = this.state.endTimestamp - Date.now();
+					this.log('INFO', `Button clicked (${this.state.clickCount} total) | Time remaining: ${this.formatDuration(remaining)}`);
+				} else {
+					this.log('WARN', 'Click dispatch failed');
+				}
 			} else {
-				this.log('WARN', 'Click dispatch failed');
+				this.log('WARN', 'Button found but could not be made interactable');
 			}
 		} else {
 			this.log('WARN', 'Button not found during interval');
@@ -461,12 +649,22 @@ class ButtonClicker {
 		this.state.attempt++;
 		this.state.isRunning = true;
 
+		// Fix aria-hidden issues before attempting to find button
+		this.fixAriaHiddenIssues();
+
 		const button = this.locateButton();
 		if (button) {
 			this.log('INFO', `Button found on attempt ${this.state.attempt}`);
-			this.dispatchClickSequence(button);
-			this.state.clickCount++;
-			this.state.lastButtonFound = Date.now();
+			// Ensure button is interactable before clicking
+			const interactableButton = this.ensureInteractable(button);
+			if (interactableButton) {
+				this.dispatchClickSequence(interactableButton);
+				this.state.clickCount++;
+				this.state.lastButtonFound = Date.now();
+			} else {
+				this.log('WARN', 'Button found but could not be made interactable on start');
+				return;
+			}
 
 			// Clear any pending timeouts
 			if (this.state.findButtonTimeout) {
@@ -541,6 +739,9 @@ const clicker = new ButtonClicker({
 // Wait for page ready and start
 clicker.waitForPageReady(() => {
 	clicker.log('INFO', 'Page ready. Starting button finder...');
+	
+	// Fix aria-hidden issues proactively
+	clicker.fixAriaHiddenIssues();
 	
 	// Setup visibility change handler
 	document.addEventListener('visibilitychange', clicker.handleVisibilityChange);
