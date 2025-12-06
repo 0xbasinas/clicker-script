@@ -122,6 +122,26 @@ class ButtonClicker {
 	ensureInteractable(element) {
 		if (!element) return null;
 
+		// Handle iframe elements
+		if (element.__iframeContext) {
+			const { document: iframeDoc } = element.__iframeContext;
+			try {
+				// Fix in iframe document context
+				const mainContainers = iframeDoc.querySelectorAll('div.main-container, [class*="main-container"]');
+				for (const container of mainContainers) {
+					if (container.hasAttribute('aria-hidden') && element.closest('.main-container') === container) {
+						container.removeAttribute('aria-hidden');
+						this.log('DEBUG', 'Removed aria-hidden from main-container in iframe');
+					}
+					if (container.hasAttribute('inert')) {
+						container.removeAttribute('inert');
+					}
+				}
+			} catch (e) {
+				this.log('DEBUG', 'Error fixing interactability in iframe:', e);
+			}
+		}
+
 		try {
 			// First, specifically fix main-container and other common containers
 			const mainContainers = document.querySelectorAll('div.main-container, [class*="main-container"]');
@@ -204,6 +224,11 @@ class ButtonClicker {
 	// Enhanced click simulation with more realistic events
 	dispatchClickSequence(target) {
 		if (!target) return false;
+
+		// Check if this is an iframe element
+		if (target.__iframeContext) {
+			return this.dispatchClickInIframe(target.__iframeContext);
+		}
 
 		try {
 			const events = [
@@ -353,13 +378,390 @@ class ButtonClicker {
 		return null;
 	}
 
-	// Find button by text content
+	// Find button by visual position (rightmost button in navigation)
+	findButtonByVisualPosition() {
+		try {
+			const navAreas = document.querySelectorAll('nav, .navigation-controls, [class*="navigation"]');
+			
+			for (const nav of navAreas) {
+				const buttons = Array.from(nav.querySelectorAll('button'));
+				if (buttons.length === 0) continue;
+
+				// Sort buttons by their right edge position (rightmost first)
+				const buttonsWithPosition = buttons.map(button => {
+					const rect = button.getBoundingClientRect();
+					return { button, right: rect.right, top: rect.top };
+				}).filter(item => item.right > 0 && item.top > 0); // Only visible buttons
+
+				if (buttonsWithPosition.length === 0) continue;
+
+				// Sort by right position (descending), then by top (ascending)
+				buttonsWithPosition.sort((a, b) => {
+					if (Math.abs(a.right - b.right) < 10) { // Same column
+						return a.top - b.top;
+					}
+					return b.right - a.right; // Rightmost first
+				});
+
+				// Get the rightmost button that's a primary button
+				for (const { button } of buttonsWithPosition) {
+					if (button.classList.contains('uikit-primary-button') ||
+						this.config.requiredClasses.some(cls => button.classList.contains(cls))) {
+						return button;
+					}
+				}
+
+				// Fallback: just return the rightmost button
+				if (buttonsWithPosition.length > 0) {
+					return buttonsWithPosition[0].button;
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Visual position search error:', e);
+		}
+		return null;
+	}
+
+	// Find button by searching for elements with arrow icons or right-pointing indicators
+	findButtonByDirectionalIndicators() {
+		try {
+			// Look for SVG icons that indicate "next" or "forward"
+			const svgSelectors = [
+				'svg[viewBox*="24"]',
+				'svg path[d*="M8"]',
+				'svg path[d*="L14"]',
+				'svg[class*="right"]',
+				'svg[class*="next"]',
+				'svg[class*="arrow"]',
+			];
+
+			for (const selector of svgSelectors) {
+				try {
+					const svgs = document.querySelectorAll(selector);
+					for (const svg of svgs) {
+						// Check if SVG is in a button
+						const button = svg.closest('button');
+						if (button && button.classList.contains('uikit-primary-button')) {
+							return button;
+						}
+					}
+				} catch (e) {
+					// Continue if selector fails
+				}
+			}
+
+			// Look for buttons with ::after or ::before pseudo-elements that might contain arrows
+			// (This is harder to detect, but we can check for classes that suggest arrows)
+			const buttons = document.querySelectorAll('button');
+			for (const button of buttons) {
+				const classes = Array.from(button.classList);
+				if (classes.some(cls => 
+					cls.includes('right') || 
+					cls.includes('next') || 
+					cls.includes('forward') ||
+					cls.includes('arrow')
+				)) {
+					if (button.classList.contains('uikit-primary-button') ||
+						button.closest('nav') ||
+						button.closest('.navigation-controls')) {
+						return button;
+					}
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Directional indicators search error:', e);
+		}
+		return null;
+	}
+
+	// Get all accessible iframes (handles cross-origin restrictions)
+	getAccessibleIframes() {
+		const iframes = [];
+		try {
+			const allIframes = document.querySelectorAll('iframe');
+			for (const iframe of allIframes) {
+				try {
+					// Try to access iframe content (will throw if cross-origin)
+					const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+					if (iframeDoc) {
+						iframes.push({
+							iframe: iframe,
+							document: iframeDoc,
+							window: iframe.contentWindow
+						});
+						
+						// Also search for nested iframes within this iframe
+						const nestedIframes = iframeDoc.querySelectorAll('iframe');
+						for (const nestedIframe of nestedIframes) {
+							try {
+								const nestedDoc = nestedIframe.contentDocument || nestedIframe.contentWindow?.document;
+								if (nestedDoc) {
+									iframes.push({
+										iframe: nestedIframe,
+										document: nestedDoc,
+										window: nestedIframe.contentWindow,
+										parentIframe: iframe
+									});
+								}
+							} catch (e) {
+								// Nested cross-origin iframe
+							}
+						}
+					}
+				} catch (e) {
+					// Cross-origin iframe, can't access content directly
+					this.log('DEBUG', 'Cross-origin iframe detected, skipping:', iframe.src || iframe.name);
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Error getting iframes:', e);
+		}
+		return iframes;
+	}
+
+	// Search for iframes that might contain the player (by src, name, or id)
+	findPlayerIframes() {
+		const playerIframes = [];
+		try {
+			const allIframes = document.querySelectorAll('iframe');
+			for (const iframe of allIframes) {
+				const src = (iframe.src || '').toLowerCase();
+				const name = (iframe.name || '').toLowerCase();
+				const id = (iframe.id || '').toLowerCase();
+				
+				// Check for common player-related keywords
+				if (src.includes('player') || src.includes('presentation') || 
+					name.includes('player') || name.includes('presentation') ||
+					id.includes('player') || id.includes('presentation') ||
+					src.includes('ispring') || name.includes('ispring') || id.includes('ispring')) {
+					
+					try {
+						const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+						if (iframeDoc) {
+							playerIframes.push({
+								iframe: iframe,
+								document: iframeDoc,
+								window: iframe.contentWindow
+							});
+						}
+					} catch (e) {
+						// Cross-origin
+					}
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Error finding player iframes:', e);
+		}
+		return playerIframes;
+	}
+
+	// Search for button in iframes
+	findButtonInIframes() {
+		try {
+			// First, try player-specific iframes (higher priority)
+			const playerIframes = this.findPlayerIframes();
+			const allIframes = this.getAccessibleIframes();
+			
+			// Combine and prioritize player iframes
+			const iframesToSearch = [...playerIframes, ...allIframes.filter(iframe => 
+				!playerIframes.some(pf => pf.iframe === iframe.iframe)
+			)];
+			
+			for (const { iframe, document: iframeDoc, window: iframeWindow } of iframesToSearch) {
+				try {
+					// Strategy 1: Try primary selector in iframe
+					const primaryMatch = iframeDoc.querySelector(this.config.primarySelector);
+					if (primaryMatch) {
+						this.log('DEBUG', 'Found button in iframe using primary selector');
+						return { element: primaryMatch, iframe: iframe, document: iframeDoc, window: iframeWindow };
+					}
+
+					// Strategy 2: Search by text content in iframe
+					const searchText = this.config.buttonText.toLowerCase();
+					const searchVariations = [
+						searchText,
+						'next',
+						'следующий',
+						'siguiente',
+						'suivant',
+						'weiter',
+						'avanti',
+					];
+
+					const allButtons = iframeDoc.querySelectorAll('button, [role="button"], [onclick]');
+					for (const button of allButtons) {
+						const textContent = this.normalizeText(button.textContent);
+						const ariaLabel = this.normalizeText(button.getAttribute('aria-label') || '');
+						const title = this.normalizeText(button.getAttribute('title') || '');
+						
+						const combinedText = `${textContent} ${ariaLabel} ${title}`;
+						
+						if (searchVariations.some(variation => combinedText.includes(variation))) {
+							if (button.classList.contains('uikit-primary-button') ||
+								button.closest('nav') ||
+								button.closest('.navigation-controls')) {
+								this.log('DEBUG', 'Found button in iframe by text content');
+								return { element: button, iframe: iframe, document: iframeDoc, window: iframeWindow };
+							}
+						}
+					}
+
+					// Strategy 3: Search by class names in iframe
+					for (const selector of this.config.alternativeSelectors) {
+						try {
+							const matches = iframeDoc.querySelectorAll(selector);
+							if (matches.length > 0) {
+								this.log('DEBUG', `Found button in iframe using selector: ${selector}`);
+								return { element: matches[0], iframe: iframe, document: iframeDoc, window: iframeWindow };
+							}
+						} catch (e) {
+							// Some selectors might fail, continue
+						}
+					}
+
+					// Strategy 4: Search by XPath in iframe
+					for (const xpath of this.config.xpathSelectors) {
+						try {
+							const result = iframeDoc.evaluate(
+								xpath,
+								iframeDoc,
+								null,
+								XPathResult.FIRST_ORDERED_NODE_TYPE,
+								null
+							);
+							const element = result.singleNodeValue;
+							if (element) {
+								this.log('DEBUG', 'Found button in iframe using XPath');
+								return { element: element, iframe: iframe, document: iframeDoc, window: iframeWindow };
+							}
+						} catch (e) {
+							// XPath might fail, continue
+						}
+					}
+
+					// Strategy 5: Search in player-specific containers (playerView, content)
+					const playerContainers = iframeDoc.querySelectorAll('#playerView, #content, [id*="player"], [class*="player"]');
+					for (const container of playerContainers) {
+						// Search for buttons with "Next" text in container
+						const buttons = container.querySelectorAll('button, [role="button"], [onclick]');
+						for (const button of buttons) {
+							const text = this.normalizeText(button.textContent);
+							if (text.includes('next') || text.includes('следующий') || text.includes('siguiente')) {
+								this.log('DEBUG', 'Found button with "Next" text in player container in iframe');
+								return { element: button, iframe: iframe, document: iframeDoc, window: iframeWindow };
+							}
+						}
+					}
+
+					// Strategy 6: Search for any element containing "Next" text in iframe
+					const allElements = iframeDoc.querySelectorAll('*');
+					for (const element of allElements) {
+						const text = this.normalizeText(element.textContent);
+						if (text.includes('next') || text.includes('следующий') || text.includes('siguiente')) {
+							// Check if it's clickable
+							if (element.tagName === 'BUTTON' ||
+								element.getAttribute('role') === 'button' ||
+								element.onclick ||
+								element.classList.contains('button')) {
+								this.log('DEBUG', 'Found clickable element with "Next" text in iframe');
+								return { element: element, iframe: iframe, document: iframeDoc, window: iframeWindow };
+							}
+							// Find closest clickable parent
+							const clickable = element.closest('button, [role="button"], [onclick]');
+							if (clickable) {
+								this.log('DEBUG', 'Found clickable parent of "Next" text in iframe');
+								return { element: clickable, iframe: iframe, document: iframeDoc, window: iframeWindow };
+							}
+						}
+					}
+				} catch (e) {
+					this.log('DEBUG', 'Error searching in iframe:', e);
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Error finding button in iframes:', e);
+		}
+		return null;
+	}
+
+	// Enhanced click for iframe elements
+	dispatchClickInIframe(iframeContext) {
+		if (!iframeContext || !iframeContext.element) return false;
+
+		try {
+			const { element, iframe, document: iframeDoc, window: iframeWindow } = iframeContext;
+
+			// Ensure element is interactable
+			const interactable = this.ensureInteractable(element);
+			if (!interactable) return false;
+
+			// Try clicking in iframe context
+			if (iframeWindow) {
+				// Dispatch events in iframe window context
+				const events = [
+					{ type: 'mouseover', bubbles: true, cancelable: true },
+					{ type: 'mousedown', bubbles: true, cancelable: true, button: 0 },
+					{ type: 'focus', bubbles: true, cancelable: true },
+					{ type: 'mouseup', bubbles: true, cancelable: true, button: 0 },
+					{ type: 'click', bubbles: true, cancelable: true, button: 0 }
+				];
+
+				for (const eventConfig of events) {
+					const rect = element.getBoundingClientRect();
+					const event = new iframeWindow.MouseEvent(eventConfig.type, {
+						view: iframeWindow,
+						bubbles: eventConfig.bubbles,
+						cancelable: eventConfig.cancelable,
+						button: eventConfig.button || 0,
+						buttons: 1,
+						clientX: rect.left + rect.width / 2,
+						clientY: rect.top + rect.height / 2
+					});
+					element.dispatchEvent(event);
+				}
+
+				// Also try native click
+				if (typeof element.click === 'function') {
+					element.click();
+				}
+
+				// Also try clicking from parent window (focus iframe first)
+				iframe.focus();
+				iframeWindow.focus();
+				
+				return true;
+			}
+		} catch (e) {
+			this.log('ERROR', 'Error dispatching click in iframe:', e);
+		}
+		return false;
+	}
+
+	// Normalize text for comparison (remove extra whitespace, lowercase)
+	normalizeText(text) {
+		if (!text) return '';
+		return text.toLowerCase().replace(/\s+/g, ' ').trim();
+	}
+
+	// Find button by text content with multiple strategies
 	findButtonByTextContent() {
 		try {
+			const searchText = this.config.buttonText.toLowerCase();
+			const searchVariations = [
+				searchText,
+				'next',
+				'следующий', // Russian
+				'siguiente', // Spanish
+				'suivant', // French
+				'weiter', // German
+				'avanti', // Italian
+			];
+
 			// Method 1: Find span with text, then get parent button
 			const textSpans = document.querySelectorAll(this.config.buttonTextSelector);
 			for (const span of textSpans) {
-				if (span.textContent.trim() === this.config.buttonText) {
+				const spanText = this.normalizeText(span.textContent);
+				if (searchVariations.some(variation => spanText.includes(variation))) {
 					const button = span.closest('button');
 					if (button && button.classList.contains('uikit-primary-button')) {
 						return button;
@@ -367,12 +769,12 @@ class ButtonClicker {
 				}
 			}
 
-			// Method 2: Find all buttons and check text content
+			// Method 2: Find all buttons and check text content (case-insensitive, partial match)
 			const allButtons = document.querySelectorAll('button');
 			for (const button of allButtons) {
-				const textContent = button.textContent.trim();
-				// Check if button contains "Next" text
-				if (textContent.includes(this.config.buttonText)) {
+				const textContent = this.normalizeText(button.textContent);
+				// Check if button contains any variation of "Next" text
+				if (searchVariations.some(variation => textContent.includes(variation))) {
 					// Verify it has the right classes
 					if (button.classList.contains('uikit-primary-button') &&
 						(this.config.requiredClasses.some(cls => button.classList.contains(cls)))) {
@@ -381,12 +783,179 @@ class ButtonClicker {
 				}
 			}
 
-			// Method 3: Find by XPath with text content
-			const xpath = `//button[contains(., "${this.config.buttonText}") and contains(@class, "uikit-primary-button")]`;
-			const element = this.evaluateXPath(xpath);
-			if (element) return element;
+			// Method 3: Find by XPath with text content (case-insensitive)
+			for (const variation of searchVariations) {
+				const xpath = `//button[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${variation}") and contains(@class, "uikit-primary-button")]`;
+				const element = this.evaluateXPath(xpath);
+				if (element) return element;
+			}
+
+			// Method 4: Search by aria-label
+			for (const button of allButtons) {
+				const ariaLabel = this.normalizeText(button.getAttribute('aria-label') || '');
+				if (searchVariations.some(variation => ariaLabel.includes(variation))) {
+					if (button.classList.contains('uikit-primary-button')) {
+						return button;
+					}
+				}
+			}
+
+			// Method 5: Search by title attribute
+			for (const button of allButtons) {
+				const title = this.normalizeText(button.getAttribute('title') || '');
+				if (searchVariations.some(variation => title.includes(variation))) {
+					if (button.classList.contains('uikit-primary-button')) {
+						return button;
+					}
+				}
+			}
+
+			// Method 6: Search by data attributes
+			for (const button of allButtons) {
+				const dataText = this.normalizeText(
+					button.getAttribute('data-text') || 
+					button.getAttribute('data-label') || 
+					button.getAttribute('data-name') || 
+					''
+				);
+				if (searchVariations.some(variation => dataText.includes(variation))) {
+					if (button.classList.contains('uikit-primary-button')) {
+						return button;
+					}
+				}
+			}
 		} catch (e) {
 			this.log('DEBUG', 'Text content search error:', e);
+		}
+		return null;
+	}
+
+	// Find any clickable element containing "Next" text (not just buttons)
+	findElementByTextContent() {
+		try {
+			const searchText = this.config.buttonText.toLowerCase();
+			const searchVariations = [
+				searchText,
+				'next',
+				'следующий',
+				'siguiente',
+				'suivant',
+				'weiter',
+				'avanti',
+			];
+
+			// Search for any clickable element containing the text
+			const clickableSelectors = [
+				'button',
+				'a[role="button"]',
+				'[role="button"]',
+				'div[onclick]',
+				'span[onclick]',
+				'div[class*="button"]',
+				'span[class*="button"]',
+			];
+
+			for (const selector of clickableSelectors) {
+				try {
+					const elements = document.querySelectorAll(selector);
+					for (const element of elements) {
+						const textContent = this.normalizeText(element.textContent);
+						const ariaLabel = this.normalizeText(element.getAttribute('aria-label') || '');
+						const title = this.normalizeText(element.getAttribute('title') || '');
+						
+						const combinedText = `${textContent} ${ariaLabel} ${title}`;
+						
+						if (searchVariations.some(variation => combinedText.includes(variation))) {
+							// Check if it's a primary button or has navigation classes
+							if (element.classList.contains('uikit-primary-button') ||
+								element.classList.contains('navigation-controls__button') ||
+								this.config.requiredClasses.some(cls => element.classList.contains(cls))) {
+								return element;
+							}
+							
+							// Also check if it's in a navigation context
+							if (element.closest('nav') || element.closest('.navigation-controls')) {
+								return element;
+							}
+						}
+					}
+				} catch (e) {
+					// Some selectors might fail, continue
+					this.log('DEBUG', `Selector failed: ${selector}`, e);
+				}
+			}
+
+			// Search using XPath for any element containing text
+			for (const variation of searchVariations) {
+				const xpath = `//*[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${variation}") and (self::button or @role="button" or @onclick or contains(@class, "button"))]`;
+				const element = this.evaluateXPath(xpath);
+				if (element) {
+					// Verify it's in a navigation context or has relevant classes
+					if (element.closest('nav') || 
+						element.closest('.navigation-controls') ||
+						element.classList.contains('uikit-primary-button')) {
+						return element;
+					}
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Element text content search error:', e);
+		}
+		return null;
+	}
+
+	// Find element by searching for text nodes containing "Next"
+	findElementByTextNode() {
+		try {
+			const searchText = this.config.buttonText.toLowerCase();
+			const searchVariations = [
+				searchText,
+				'next',
+				'следующий',
+				'siguiente',
+				'suivant',
+				'weiter',
+				'avanti',
+			];
+
+			// Walk through all text nodes
+			const walker = document.createTreeWalker(
+				document.body,
+				NodeFilter.SHOW_TEXT,
+				{
+					acceptNode: (node) => {
+						const text = this.normalizeText(node.textContent);
+						return searchVariations.some(variation => text.includes(variation))
+							? NodeFilter.FILTER_ACCEPT
+							: NodeFilter.FILTER_REJECT;
+					}
+				}
+			);
+
+			let textNode;
+			while (textNode = walker.nextNode()) {
+				// Find the closest clickable parent
+				let parent = textNode.parentElement;
+				while (parent && parent !== document.body) {
+					// Check if parent is clickable
+					if (parent.tagName === 'BUTTON' ||
+						parent.getAttribute('role') === 'button' ||
+						parent.onclick ||
+						parent.classList.contains('button') ||
+						parent.classList.contains('uikit-primary-button')) {
+						
+						// Verify it's in navigation context or has relevant classes
+						if (parent.classList.contains('uikit-primary-button') ||
+							parent.closest('nav') ||
+							parent.closest('.navigation-controls')) {
+							return parent;
+						}
+					}
+					parent = parent.parentElement;
+				}
+			}
+		} catch (e) {
+			this.log('DEBUG', 'Text node search error:', e);
 		}
 		return null;
 	}
@@ -439,11 +1008,25 @@ class ButtonClicker {
 				const matches = document.querySelectorAll(this.config.primarySelector);
 				return Array.from(matches)[0] || null;
 			},
-			// Strategy 2: Find by text content "Next" (very reliable)
+			// Strategy 2: Find by text content "Next" (very reliable) - enhanced
 			() => this.findButtonByTextContent(),
-			// Strategy 3: Find by SVG icon (very reliable)
+			// Strategy 3: Find any clickable element containing "Next" text
+			() => this.findElementByTextContent(),
+			// Strategy 4: Find by searching text nodes containing "Next"
+			() => this.findElementByTextNode(),
+			// Strategy 5: Find by SVG icon (very reliable)
 			() => this.findButtonByIcon(),
-			// Strategy 4: Alternative CSS selectors
+			// Strategy 6: Search in iframes
+			() => {
+				const iframeResult = this.findButtonInIframes();
+				if (iframeResult) {
+					// Store iframe context for later use
+					iframeResult.element.__iframeContext = iframeResult;
+					return iframeResult.element;
+				}
+				return null;
+			},
+			// Strategy 6: Alternative CSS selectors
 			() => {
 				for (const selector of this.config.alternativeSelectors) {
 					try {
@@ -456,7 +1039,7 @@ class ButtonClicker {
 				}
 				return null;
 			},
-			// Strategy 5: XPath selectors
+			// Strategy 7: XPath selectors
 			() => {
 				for (const xpath of this.config.xpathSelectors) {
 					const element = this.evaluateXPath(xpath);
@@ -464,13 +1047,44 @@ class ButtonClicker {
 				}
 				return null;
 			},
-			// Strategy 6: Modals and overlays
+			// Strategy 8: Modals and overlays
 			() => this.findButtonInModalsAndOverlays(),
-			// Strategy 7: Position and context
+			// Strategy 9: Position and context
 			() => this.findButtonByPositionAndContext(),
-			// Strategy 8: CSS property matching
+			// Strategy 10: Visual position (rightmost button)
+			() => this.findButtonByVisualPosition(),
+			// Strategy 11: Directional indicators (arrows, right icons)
+			() => this.findButtonByDirectionalIndicators(),
+			// Strategy 12: CSS property matching
 			() => this.findButtonByCSSProperties(),
-			// Strategy 9: Last resort - any button with required classes
+			// Strategy 13: Search for elements with "Next" in navigation areas
+			() => {
+				try {
+					const navAreas = document.querySelectorAll('nav, .navigation-controls, [class*="navigation"]');
+					for (const nav of navAreas) {
+						const allElements = nav.querySelectorAll('*');
+						for (const element of allElements) {
+							const text = this.normalizeText(element.textContent);
+							if (text.includes('next') || text.includes('следующий') || text.includes('siguiente')) {
+								// Check if it's clickable
+								if (element.tagName === 'BUTTON' ||
+									element.getAttribute('role') === 'button' ||
+									element.onclick ||
+									element.classList.contains('button')) {
+									return element;
+								}
+								// Find closest clickable parent
+								const clickable = element.closest('button, [role="button"], [onclick]');
+								if (clickable) return clickable;
+							}
+						}
+					}
+				} catch (e) {
+					this.log('DEBUG', 'Navigation area search error:', e);
+				}
+				return null;
+			},
+			// Strategy 14: Last resort - any button with required classes
 			() => {
 				const allButtons = document.querySelectorAll('button');
 				for (const button of allButtons) {
