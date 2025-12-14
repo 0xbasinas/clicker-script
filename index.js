@@ -36,7 +36,7 @@ class ButtonClicker {
 			visibilityCheckDelay: 100,
 			maxAttempts: 10,
 			// Runtime
-			durationMs: 2 * 60 * 60 * 1000, // 2 hours
+			durationMs: 3 * 60 * 60 * 1000, // 2 hours
 			// Button properties
 			primaryButtonColor: 'rgba(95, 139, 217',
 			requiredClasses: ['uikit-primary-button_next', 'navigation-controls__button_next'],
